@@ -28,103 +28,63 @@
 //
 
 #include "TPCircularBuffer.h"
-#include <mach/mach.h>
+#include <sys/mman.h>
+#include <stdlib.h>
 #include <stdio.h>
+#include <unistd.h>
 
-#define reportResult(result,operation) (_reportResult((result),(operation),strrchr(__FILE__, '/')+1,__LINE__))
-static inline bool _reportResult(kern_return_t result, const char *operation, const char* file, int line) {
-    if ( result != ERR_SUCCESS ) {
-        printf("%s:%d: %s: %s\n", file, line, operation, mach_error_string(result)); 
-        return false;
-    }
-    return true;
+static inline int round_page(int length) {
+    int pagesize = getpagesize();
+    return length + pagesize - 1 - (length - 1) % pagesize;
 }
 
 bool TPCircularBufferInit(TPCircularBuffer *buffer, int32_t length) {
 
-    // Keep trying until we get our buffer, needed to handle race conditions
-    int retries = 3;
-    while ( true ) {
+    buffer->length = (int32_t)round_page(length);    // We need whole page sizes
 
-        buffer->length = (int32_t)round_page(length);    // We need whole page sizes
+    // Create a temporary file to identify the memory block, that we immediatly unlink
+    char name[] = "/tmp/ringXXXXXX";
+    int fd = mkstemp(name);
+    if ( fd < 0 ) {
+        return false;
+    } 
+    unlink(name);
 
-        // Temporarily allocate twice the length, so we have the contiguous address space to
-        // support a second instance of the buffer directly after
-        vm_address_t bufferAddress;
-        kern_return_t result = vm_allocate(mach_task_self(),
-                                           &bufferAddress,
-                                           buffer->length * 2,
-                                           VM_FLAGS_ANYWHERE); // allocate anywhere it'll fit
-        if ( result != ERR_SUCCESS ) {
-            if ( retries-- == 0 ) {
-                reportResult(result, "Buffer allocation");
-                return false;
-            }
-            // Try again if we fail
-            continue;
-        }
-        
-        // Now replace the second half of the allocation with a virtual copy of the first half. Deallocate the second half...
-        result = vm_deallocate(mach_task_self(),
-                               bufferAddress + buffer->length,
-                               buffer->length);
-        if ( result != ERR_SUCCESS ) {
-            if ( retries-- == 0 ) {
-                reportResult(result, "Buffer deallocation");
-                return false;
-            }
-            // If this fails somehow, deallocate the whole region and try again
-            vm_deallocate(mach_task_self(), bufferAddress, buffer->length);
-            continue;
-        }
-        
-        // Re-map the buffer to the address space immediately after the buffer
-        vm_address_t virtualAddress = bufferAddress + buffer->length;
-        vm_prot_t cur_prot, max_prot;
-        result = vm_remap(mach_task_self(),
-                          &virtualAddress,   // mirror target
-                          buffer->length,    // size of mirror
-                          0,                 // auto alignment
-                          0,                 // force remapping to virtualAddress
-                          mach_task_self(),  // same task
-                          bufferAddress,     // mirror source
-                          0,                 // MAP READ-WRITE, NOT COPY
-                          &cur_prot,         // unused protection struct
-                          &max_prot,         // unused protection struct
-                          VM_INHERIT_DEFAULT);
-        if ( result != ERR_SUCCESS ) {
-            if ( retries-- == 0 ) {
-                reportResult(result, "Remap buffer memory");
-                return false;
-            }
-            // If this remap failed, we hit a race condition, so deallocate and try again
-            vm_deallocate(mach_task_self(), bufferAddress, buffer->length);
-            continue;
-        }
-        
-        if ( virtualAddress != bufferAddress+buffer->length ) {
-            // If the memory is not contiguous, clean up both allocated buffers and try again
-            if ( retries-- == 0 ) {
-                printf("Couldn't map buffer memory to end of buffer\n");
-                return false;
-            }
-
-            vm_deallocate(mach_task_self(), virtualAddress, buffer->length);
-            vm_deallocate(mach_task_self(), bufferAddress, buffer->length);
-            continue;
-        }
-        
-        buffer->buffer = (void*)bufferAddress;
-        buffer->fillCount = 0;
-        buffer->head = buffer->tail = 0;
-        
-        return true;
+    // Grow the file, to allow mmap, but don't actually allocate space
+    if (ftruncate(fd, buffer->length*2) < 0) {
+        close(fd);
+        return false;
     }
-    return false;
+
+    // Temporarily allocate twice the length, so we have the contiguous address space to
+    // support a second instance of the buffer directly after
+    void* bufferAddress = mmap(NULL, buffer->length*2, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+    if ( bufferAddress == (void*) -1 ) {
+        close(fd);
+        return false;
+    }
+
+    buffer->buffer = bufferAddress;
+    buffer->fillCount = 0;
+    buffer->head = buffer->tail = 0;
+
+    // Now replace the second half of the allocation with a virtual copy of the first half
+    void* virtualAddress = mmap(bufferAddress + buffer->length, buffer->length,
+                                PROT_READ|PROT_WRITE, MAP_SHARED|MAP_FIXED, fd, 0);
+        
+    // Cleanup, as we don't need the descriptor anymore
+    close(fd);
+
+    if ( virtualAddress != bufferAddress+buffer->length ) {
+        munmap(buffer->buffer, buffer->length * 2);
+        return false;
+    }
+
+    return true;
 }
 
 void TPCircularBufferCleanup(TPCircularBuffer *buffer) {
-    vm_deallocate(mach_task_self(), (vm_address_t)buffer->buffer, buffer->length * 2);
+    munmap(buffer->buffer, buffer->length * 2);
     memset(buffer, 0, sizeof(TPCircularBuffer));
 }
 
