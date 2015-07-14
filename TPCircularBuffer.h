@@ -43,6 +43,8 @@
 #define TPCircularBuffer_h
 
 #include <libkern/OSAtomic.h>
+#include <stdbool.h>
+#include <sys/types.h>
 #include <string.h>
 #include <assert.h>
 
