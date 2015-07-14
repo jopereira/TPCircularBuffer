@@ -1,3 +1,10 @@
+//  This is an altered source version of TPCircularBuffer available at:
+//
+//  https://github.com/jopereira/TPCircularBuffer
+//
+//  The original version is available and distributed as follows:
+//  
+//---------------------------------------------------------------------------
 //
 //  TPCircularBuffer.h
 //  Circular/Ring buffer implementation

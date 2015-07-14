@@ -1,3 +1,7 @@
+This is an altered source version of TPCircularBuffer, using [libatomic_ops](http://www.hpl.hp.com/research/linux/atomic_ops/) and POSIX `mmap()` for portability. It has been tested on Linux. The original software is found at https://github.com/michaeltyson/TPCircularBuffer . The original README is as follows:
+
+-----------------------------------------------------
+
 A simple, fast circular buffer implementation for audio processing
 ==================================================================
 
